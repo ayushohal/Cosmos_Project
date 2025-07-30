@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify 
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import os
 import json
@@ -32,7 +32,7 @@ def allowed_file(filename):
 
 @app.route('/')
 def home():
-    return jsonify({'message': 'Formwork Panel Optimization API running.'}), 200
+    return render_template('index.html')
 
 @app.route('/api/extract-castings', methods=['POST'])
 def extract_castings():
