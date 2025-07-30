@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Formwork Panel Optimization</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="container mx-auto p-4 max-w-4xl">
+        <h1 class="text-3xl font-bold mb-6 text-center">Formwork Panel Optimization System</h1>
+
+        <!-- File Upload Section -->
+        <div class="bg-white p-6 rounded-lg shadow-md mb-6">
+            <h2 class="text-xl font-semibold mb-4">Upload PDF</h2>
+            <input type="file" id="pdfInput" accept=".pdf" class="block w-full text-sm text-gray-500
+                file:mr-4 file:py-2 file:px-4
+                file:rounded-full file:border-0
+                file:text-sm file:font-semibold
+                file:bg-blue-50 file:text-blue-700
+                hover:file:bg-blue-100">
+            <p id="uploadStatus" class="mt-2 text-sm text-gray-600"></p>
+        </div>
+
+        <!-- Primary Casting Selection -->
+        <div id="castingSelection" class="bg-white p-6 rounded-lg shadow-md mb-6 hidden">
+            <h2 class="text-xl font-semibold mb-4">Select Primary Casting</h2>
+            <select id="primaryCasting" class="w-full p-2 border rounded-md">
+                <option value="">Select a casting...</option>
+            </select>
+        </div>
+
+        <!-- Optimize Button -->
+        <div class="text-center mb-6">
+            <button id="optimizeBtn" class="bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 disabled:bg-gray-400" disabled>
+                Optimize Panels
+            </button>
+        </div>
+
+        <!-- Results Display -->
+        <div id="results" class="bg-white p-6 rounded-lg shadow-md hidden">
+            <h2 class="text-xl font-semibold mb-4">Optimization Results</h2>
+            <div id="resultsContent" class="text-sm"></div>
+            <div class="mt-4">
+                <a id="downloadResults" href="#" class="bg-green-500 text-white py-2 px-4 rounded-md hover:bg-green-600">Download Results (JSON)</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Handle PDF upload
+        document.getElementById('pdfInput').addEventListener('change', async (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            document.getElementById('uploadStatus').textContent = 'Processing PDF...';
+            
+            try {
+                const formData = new FormData();
+                formData.append('pdf', file);
+                const response = await fetch('http://localhost:5000/api/extract-castings', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!response.ok) throw new Error('Failed to process PDF');
+                const castingsData = await response.json();
+
+                document.getElementById('uploadStatus').textContent = 'PDF processed successfully!';
+                
+                // Populate casting selection
+                const select = document.getElementById('primaryCasting');
+                select.innerHTML = '<option value="">Select a casting...</option>';
+                castingsData.forEach((casting, index) => {
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.textContent = casting.name;
+                    select.appendChild(option);
+                });
+                
+                document.getElementById('castingSelection').classList.remove('hidden');
+                document.getElementById('optimizeBtn').disabled = false;
+
+                // Store castings data globally
+                window.castingsData = castingsData;
+            } catch (error) {
+                document.getElementById('uploadStatus').textContent = 'Error processing PDF: ' + error.message;
+                console.error(error);
+            }
+        });
+
+        // Handle Optimize button click
+        document.getElementById('optimizeBtn').addEventListener('click', async () => {
+            const primaryIdx = document.getElementById('primaryCasting').value;
+            if (!primaryIdx) {
+                alert('Please select a primary casting.');
+                return;
+            }
+
+            document.getElementById('optimizeBtn').disabled = true;
+            document.getElementById('optimizeBtn').textContent = 'Optimizing...';
+
+            try {
+                const response = await fetch('http://localhost:5000/api/optimize', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ castings: window.castingsData, primaryIdx: parseInt(primaryIdx) })
+                });
+                if (!response.ok) throw new Error('Optimization failed');
+                const optimizationResults = await response.json();
+
+                // Display results
+                const resultsContent = document.getElementById('resultsContent');
+                resultsContent.innerHTML += `
+                    <div class="mt-4">
+                        <h3 class="font-semibold">Summary</h3>
+                        <p>Total castings: ${optimizationResults.optimization_summary.total_castings}</p>
+                        <p>Primary casting: ${optimizationResults.optimization_summary.primary_casting}</p>
+                        <p>Panel sizes used: ${optimizationResults.optimization_summary.panel_sizes_used.join(', ')}mm</p>
+                    </div>
+                `;
+                resultsContent.innerHTML += `
+    <div class="mt-4">
+        <h3 class="font-semibold mb-2">Detailed Optimization Summary</h3>
+        <pre class="bg-gray-100 p-4 rounded overflow-x-auto whitespace-pre-wrap border border-gray-300 text-sm">
+${optimizationResults.optimization_summary.text_summary}
+        </pre>
+    </div>
+`;
+
+                // Setup download link
+                const downloadLink = document.getElementById('downloadResults');
+                const blob = new Blob([JSON.stringify(optimizationResults, null, 2)], { type: 'application/json' });
+                downloadLink.href = URL.createObjectURL(blob);
+                downloadLink.download = 'optimization_results.json';
+
+                document.getElementById('results').classList.remove('hidden');
+            } catch (error) {
+                alert('Error during optimization: ' + error.message);
+                console.error(error);
+            } finally {
+                document.getElementById('optimizeBtn').disabled = false;
+                document.getElementById('optimizeBtn').textContent = 'Optimize Panels';
+            }
+        });
+    </script>
+</body>
+</html>
