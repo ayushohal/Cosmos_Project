@@ -41,8 +41,9 @@
         <div id="results" class="bg-white p-6 rounded-lg shadow-md hidden">
             <h2 class="text-xl font-semibold mb-4">Optimization Results</h2>
             <div id="resultsContent" class="text-sm"></div>
-            <div class="mt-4">
+            <div class="mt-4 flex space-x-4">
                 <a id="downloadResults" href="#" class="bg-green-500 text-white py-2 px-4 rounded-md hover:bg-green-600">Download Results (JSON)</a>
+                <a id="downloadExcel" href="#" class="bg-green-500 text-white py-2 px-4 rounded-md hover:bg-green-600">Download Excel</a>
             </div>
         </div>
     </div>
@@ -127,11 +128,16 @@ ${optimizationResults.optimization_summary.text_summary}
     </div>
 `;
 
-                // Setup download link
+                // Setup JSON download link
                 const downloadLink = document.getElementById('downloadResults');
                 const blob = new Blob([JSON.stringify(optimizationResults, null, 2)], { type: 'application/json' });
                 downloadLink.href = URL.createObjectURL(blob);
                 downloadLink.download = 'optimization_results.json';
+
+                // Setup Excel download link
+                const excelLink = document.getElementById('downloadExcel');
+                excelLink.href = 'http://localhost:5000/api/download-excel';
+                excelLink.download = 'consolidated_list.xlsx';
 
                 document.getElementById('results').classList.remove('hidden');
             } catch (error) {

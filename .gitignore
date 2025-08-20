@@ -14,15 +14,22 @@ venv/
 env/
 .venv/
 
+# Pip / package-related
+pip-wheel-metadata/
+*.whl
+*.tar.gz
+*.bak
+*.tmp
+
 # Flask-specific ignores
 instance/
 *.log
 
 # Project-specific ignores
-uploads/
-*.pdf
 uploads/*.png
 optimization_results.json
+*.xlsx
+*.xls
 
 # Environment variables
 .env
@@ -38,7 +45,5 @@ optimization_results.json
 Thumbs.db
 
 # Miscellaneous
-*.bak
 *.swp
 *~
-*.tmp
