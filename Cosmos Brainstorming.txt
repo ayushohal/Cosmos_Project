@@ -1,0 +1,22 @@
+1. Start with naming opposite first. Like it should be opposites in pairs. In that also first write the length which has IC in it.
+2. make 2 groups, 1st group contains lengths/sides of one side of opposite and the 2nd group contains lengths/sides of the second side of the opposite. 
+Eg:- LW-1,2,3
+2800IC
+IC900
+=3500IC
+400end
+
+next ex:-
+IC1900IC
+200
+200
+400
+=IC2100
+600end
+
+3. = sign before a dimension tells that the other end of the opposite is starting now so basically we can distinguish both groups
+4. 'end' tells us that both groups of opposites are done and now we are moving on to a new set of opposites.
+5. Wherever 'IC' is written along with a dimension that means we have to take 100mm for the IC meaning 2800-100 so basically 2700 and 
+100mm(IC).
+6. Now what happens is that you take the 1st group of opposites and calculate its panels including IC. Then you take the 2nd group where you first set up all the ICincluded dimensions from the 1st group  and then the remaining dimensions from the 1st group in 2nd group. This was parallel placement of panels would be achieved. Now if the 2nd group of opposites is still has remainimg or left dimensions then we will normally calculate the panels for that.
+7. Extra- Later if there are adjacent panel sizes of like 200,100 then convert it to 300, or similar. (But this is complicated. For this we will have to name the sides in order in the groups as well like 750, IC3000IC, IC325).
