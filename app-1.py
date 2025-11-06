@@ -25,112 +25,24 @@ UPLOAD_FOLDER = 'Uploads'
 ALLOWED_EXTENSIONS = {'pdf'}
 RESULTS_FILE = 'optimization_results.json'
 
-# Constants - Standard Modular Formwork System
-STANDARD_PANEL_SIZES = [600, 550, 525, 500, 450, 425, 400, 350, 325, 300, 250, 225, 200, 175, 150, 125, 100]
+# Constants
 MIN_PANEL_SIZE = 100
 MAX_PANEL_SIZE = 600
+STANDARD_PANEL_SIZES = [100, 200, 300, 400, 500, 600]
 
-# IC/EC Standard Sizes (for display only, NOT subtracted from length)
-IC_SIZES = [25, 50, 100]
-EC_SIZES = [25, 50, 65]
+# IC/EC Constants - Hardcoded shape requirements
+SHAPE_IC_EC_REQUIREMENTS = {
+    'column': {'IC': 0, 'EC': 4},
+    'l-shape': {'IC': 1, 'EC': 5},
+    'e-shape': {'IC': 4, 'EC': 8},
+    'u-shape': {'IC': 2, 'EC': 6},
+    'lift': {'IC': 2, 'EC': 6},
+    't-shape': {'IC': 2, 'EC': 6},
+    'i-shape': {'IC': 4, 'EC': 8}
+}
 
 # Cache for storing previously computed panel combinations
 panel_combinations_cache = {}
-
-# Cache for storing valid join combinations for each target size
-join_cache = {}
-
-def initialize_join_cache():
-    """
-    Pre-compute all valid joining combinations for standard panel sizes.
-    Rules:
-    - Only panels of identical width can be joined
-    - Sum must exactly match a standard size
-    - Maximum 3 panels can be joined
-    """
-    global join_cache
-    join_cache = {}
-    
-    for target in STANDARD_PANEL_SIZES:
-        valid_joins = []
-        
-        # Try joining 2 panels
-        for size1 in STANDARD_PANEL_SIZES:
-            if size1 >= target:
-                continue
-            for size2 in STANDARD_PANEL_SIZES:
-                if size2 > size1:  # Avoid duplicates
-                    continue
-                if size1 + size2 == target:
-                    valid_joins.append(([size1, size2], 2))
-        
-        # Try joining 3 panels
-        for size1 in STANDARD_PANEL_SIZES:
-            if size1 >= target:
-                continue
-            for size2 in STANDARD_PANEL_SIZES:
-                if size2 > size1:
-                    continue
-                for size3 in STANDARD_PANEL_SIZES:
-                    if size3 > size2:
-                        continue
-                    if size1 + size2 + size3 == target:
-                        valid_joins.append(([size1, size2, size3], 3))
-        
-        # Sort by preference: fewer panels, larger panels
-        valid_joins.sort(key=lambda x: (x[1], -sum(x[0]) / len(x[0])))
-        join_cache[target] = valid_joins
-    
-    print(f"\n✓ Join cache initialized with {len(join_cache)} target sizes")
-
-def try_reuse_or_join(size: int, inventory: Dict[int, int]) -> Tuple[bool, List[int]]:
-    """
-    Try to satisfy a panel requirement by:
-    1. Using exact size from inventory
-    2. Joining smaller panels to create the size
-    3. Return False if neither works (new panel needed)
-    
-    Args:
-        size: Required panel size
-        inventory: Current panel inventory {size: count}
-    
-    Returns:
-        (success: bool, consumed_panels: List[int])
-        - If success=True, consumed_panels shows which panels were used
-        - Inventory is updated in-place
-    """
-    # Strategy 1: Use exact size if available
-    if inventory.get(size, 0) > 0:
-        inventory[size] -= 1
-        return (True, [size])
-    
-    # Strategy 2: Try to join smaller panels
-    if size in join_cache:
-        for join_combo, num_panels in join_cache[size]:
-            # Check if we have all required panels in inventory
-            temp_inventory = inventory.copy()
-            can_join = True
-            
-            for required_size in join_combo:
-                if temp_inventory.get(required_size, 0) > 0:
-                    temp_inventory[required_size] -= 1
-                else:
-                    can_join = False
-                    break
-            
-            if can_join:
-                # Execute the join: consume source panels from inventory
-                for required_size in join_combo:
-                    inventory[required_size] -= 1
-                
-                print(f"    → Joined {join_combo} to create {size}mm panel")
-                return (True, join_combo)
-    
-    # Strategy 3: Cannot satisfy from inventory
-    return (False, [])
-
-# Initialize join cache at module load
-initialize_join_cache()
 
 # Setup
 app = Flask(__name__)
@@ -141,12 +53,11 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # Logger setup
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- TEXT-BASED EXTRACTION FUNCTION (EXTENDED WITH IC/EC DETECTION) ---
+# --- TEXT-BASED EXTRACTION FUNCTION (from text_extraction.py) ---
 
 def extract_castings_from_pdf(pdf_path):
     """
     Extract casting data from PDF using text-based extraction.
-    EXTENDED: Now detects IC and EC counts from text patterns like IC-1, EC-2, etc.
     Returns structured casting data compatible with optimization logic.
     """
     doc = fitz.open(pdf_path)
@@ -169,21 +80,9 @@ def extract_castings_from_pdf(pdf_path):
             current_wall = None
             continue
 
-        # Detect IC count pattern (IC-1, IC-2, etc.)
-        ic_match = re.search(r'IC[-\s]*(\d+)', line, re.IGNORECASE)
-        if ic_match and current_wall is not None:
-            current_wall["IC"] = int(ic_match.group(1))
-            continue
-
-        # Detect EC count pattern (EC-1, EC-2, etc.)
-        ec_match = re.search(r'EC[-\s]*(\d+)', line, re.IGNORECASE)
-        if ec_match and current_wall is not None:
-            current_wall["EC"] = int(ec_match.group(1))
-            continue
-
         # Any line containing letters -> wall ID
         elif re.search(r'[a-zA-Z]', line):
-            current_wall = {"id": line.strip(), "sides": [], "IC": 0, "EC": 0}
+            current_wall = {"id": line.strip(), "sides": []}
             if current_casting:
                 current_casting["equipment_groups"].append(current_wall)
             continue
@@ -211,20 +110,14 @@ def extract_castings_from_pdf(pdf_path):
         for wall in casting["equipment_groups"]:
             wall_id = wall["id"]
             sides = wall["sides"]
-            ic_count = wall.get("IC", 0)
-            ec_count = wall.get("EC", 0)
             
-            # Create shape with all sides and IC/EC counts
+            # Create shape with all sides
             shape_name = f"Shape_{wall_id}"
             sides_dict = {}
             for i, side in enumerate(sides, 1):
                 sides_dict[f"side{i}"] = int(side)
             
-            shapes_data[shape_name] = {
-                "sides": sides_dict,
-                "IC": ic_count,
-                "EC": ec_count
-            }
+            shapes_data[shape_name] = sides_dict
         
         if shapes_data:
             castings_data.append({
@@ -234,21 +127,50 @@ def extract_castings_from_pdf(pdf_path):
     
     return castings_data
 
+# --- HELPER FUNCTIONS for SHAPE CLASSIFICATION ---
+
+def classify_shape_type(shape_name: str) -> str:
+    """
+    Classify shape type based on name patterns for IC/EC calculations.
+    Returns the shape type key for SHAPE_IC_EC_REQUIREMENTS lookup.
+    """
+    shape_lower = shape_name.lower()
+    
+    # Check for specific patterns
+    if 'sw' in shape_lower or 'column' in shape_lower:
+        return 'column'
+    elif 'lift' in shape_lower or 'lsw' in shape_lower:
+        return 'lift'
+    elif 'l' in shape_lower and ('shape' in shape_lower or 'lw' in shape_lower):
+        return 'l-shape'
+    elif 'e' in shape_lower and ('shape' in shape_lower or len(shape_lower) <= 3):
+        return 'e-shape'
+    elif 'u' in shape_lower and ('shape' in shape_lower or len(shape_lower) <= 3):
+        return 'u-shape'
+    elif 't' in shape_lower and ('shape' in shape_lower or len(shape_lower) <= 3):
+        return 't-shape'
+    elif 'i' in shape_lower and ('shape' in shape_lower or len(shape_lower) <= 3):
+        return 'i-shape'
+    
+    # Default to column if no specific pattern matches
+    return 'column'
+
 # --- PANEL OPTIMIZATION CLASSES AND FUNCTIONS ---
 
 class Shape:
-    def __init__(self, name: str, sides: List[int], ic_count: int = 0, ec_count: int = 0):
+    def __init__(self, name: str, sides: List[int]):
         self.name = name
         self.sides = sides
         self.panel_layout = [[] for _ in range(len(sides))]
-        self.ic_requirement = ic_count
-        self.ec_requirement = ec_count
+        self.shape_type = classify_shape_type(name)
+        self.ic_requirement = SHAPE_IC_EC_REQUIREMENTS[self.shape_type]['IC']
+        self.ec_requirement = SHAPE_IC_EC_REQUIREMENTS[self.shape_type]['EC']
     
     def get_total_length(self) -> int:
         return sum(self.sides)
     
     def __str__(self) -> str:
-        return f"Shape: {self.name}, Sides: {self.sides}, IC: {self.ic_requirement}, EC: {self.ec_requirement}"
+        return f"Shape: {self.name}, Sides: {self.sides}, Type: {self.shape_type}, IC: {self.ic_requirement}, EC: {self.ec_requirement}"
 
 class Casting:
     def __init__(self, name: str):
@@ -326,146 +248,128 @@ def analyze_castings(castings: List[Casting]) -> Dict:
         "panel_efficiency": panel_efficiency
     }
 
-def get_panel_combination_exact(target_length: int) -> List[int]:
+def get_possible_panels(length: int) -> List[List[int]]:
     """
-    Generate EXACT panel combination for a given length.
-    
-    CRITICAL RULES:
-    1. IC/EC are NOT subtracted - they mount on top of panels
-    2. Total panel length MUST EXACTLY equal target_length
-    3. Use largest to smallest standard panels
-    4. If no standard combination works, use ONE custom panel
-    5. NO remainders or mismatches allowed
-    
-    Returns: List of panel sizes that sum EXACTLY to target_length
+    Generate optimal panel combinations for a given length.
+    Ensures all panels are within the valid size range (MIN_PANEL_SIZE to MAX_PANEL_SIZE).
     """
-    # Check cache first
-    if target_length in panel_combinations_cache:
-        return panel_combinations_cache[target_length]
+    if length in panel_combinations_cache:
+        return panel_combinations_cache[length]
     
-    # If target is a standard size, return it
-    if target_length in STANDARD_PANEL_SIZES:
-        panel_combinations_cache[target_length] = [target_length]
-        return [target_length]
+    valid_panels = []
+    standard_sizes = sorted(STANDARD_PANEL_SIZES, reverse=True)
     
-    # Try to find exact combination with standard panels
-    best_combination = None
+    if length < MIN_PANEL_SIZE:
+        valid_panels.append([MIN_PANEL_SIZE])
+        panel_combinations_cache[length] = valid_panels
+        return valid_panels
     
-    # Strategy 1: Greedy approach - use largest panels first
-    def greedy_exact_fit(length):
-        """Fill with largest panels, ensuring EXACT match."""
-        panels = []
-        remaining = length
+    if length >= MAX_PANEL_SIZE:
+        num_max_panels = length // MAX_PANEL_SIZE
+        remaining = length - (num_max_panels * MAX_PANEL_SIZE)
         
-        for size in STANDARD_PANEL_SIZES:
-            while remaining >= size:
-                panels.append(size)
-                remaining -= size
-                
-                if remaining == 0:
-                    return sorted(panels, reverse=True)
-        
-        # If there's a remainder, we need to adjust
-        if remaining > 0 and panels:
-            # Remove last panel and try to fill with a custom size
-            last_panel = panels.pop()
-            needed = last_panel + remaining
-            
-            # Try to split needed into standard sizes
-            for split_size in STANDARD_PANEL_SIZES:
-                if split_size < needed:
-                    other_size = needed - split_size
-                    if other_size in STANDARD_PANEL_SIZES:
-                        panels.extend([split_size, other_size])
-                        return sorted(panels, reverse=True)
-            
-            # Use custom panel for exact fit
-            panels.append(needed)
-            return sorted(panels, reverse=True)
-        
-        return None
-    
-    # Try greedy approach
-    greedy_result = greedy_exact_fit(target_length)
-    if greedy_result and sum(greedy_result) == target_length:
-        best_combination = greedy_result
-    
-    # Strategy 2: Try combinations of 2-4 standard panels
-    if not best_combination or sum(1 for p in best_combination if p not in STANDARD_PANEL_SIZES) > 0:
-        for num_panels in range(2, 5):
-            for combo in itertools.combinations_with_replacement(STANDARD_PANEL_SIZES, num_panels):
-                if sum(combo) == target_length:
-                    combo_list = sorted(list(combo), reverse=True)
-                    if not best_combination or len(combo_list) < len(best_combination):
-                        best_combination = combo_list
-                    break
-            if best_combination and all(p in STANDARD_PANEL_SIZES for p in best_combination):
-                break
-    
-    # Strategy 3: If still no exact match, use custom panel
-    if not best_combination or sum(best_combination) != target_length:
-        # Check if we can make it with one large standard + custom
-        if target_length > MAX_PANEL_SIZE:
-            panels = []
-            remaining = target_length
-            
-            # Use as many 600mm panels as possible
-            while remaining > MAX_PANEL_SIZE:
-                panels.append(MAX_PANEL_SIZE)
-                remaining -= MAX_PANEL_SIZE
-            
-            # Handle the remainder
-            if remaining in STANDARD_PANEL_SIZES:
-                panels.append(remaining)
-            else:
-                # Try to split remainder into standards
-                found_split = False
-                for size1 in STANDARD_PANEL_SIZES:
-                    if size1 < remaining:
-                        size2 = remaining - size1
-                        if size2 in STANDARD_PANEL_SIZES and size2 >= MIN_PANEL_SIZE:
-                            panels.extend([size1, size2])
-                            found_split = True
-                            break
-                
-                if not found_split:
-                    # Use custom panel for exact fit
-                    panels.append(remaining)
-            
-            best_combination = sorted(panels, reverse=True)
+        if remaining == 0:
+            valid_panels.append([MAX_PANEL_SIZE] * num_max_panels)
+        elif remaining >= MIN_PANEL_SIZE:
+            valid_panels.append([MAX_PANEL_SIZE] * num_max_panels + [remaining])
         else:
-            # Single custom panel
-            best_combination = [target_length]
+            adjusted_length = MAX_PANEL_SIZE + remaining
+            for r in range(1, 3):
+                for combo in itertools.combinations_with_replacement(standard_sizes, r):
+                    if sum(combo) == adjusted_length and all(p >= MIN_PANEL_SIZE for p in combo):
+                        valid_panels.append([MAX_PANEL_SIZE] * (num_max_panels - 1) + list(combo))
+            if not any(p for p in valid_panels if sum(p) == length) and adjusted_length >= MIN_PANEL_SIZE:
+                valid_panels.append([MAX_PANEL_SIZE] * (num_max_panels - 1) + [adjusted_length])
     
-    # Verify the combination sums to exactly target_length
-    if best_combination:
-        actual_sum = sum(best_combination)
-        if actual_sum != target_length:
-            # Force exact match with adjustment
-            diff = target_length - actual_sum
-            if diff != 0 and best_combination:
-                # Adjust the last panel
-                best_combination[-1] += diff
+    for r in range(1, min(8, length // MIN_PANEL_SIZE + 1)):
+        for combo in itertools.combinations_with_replacement(standard_sizes, r):
+            if sum(combo) == length:
+                valid_panels.append(list(combo))
     
-    # Final safety check
-    if not best_combination or sum(best_combination) != target_length:
-        # Last resort: use single custom panel
-        best_combination = [target_length]
+    for size1 in standard_sizes:
+        if size1 <= length:
+            max_count1 = min(length // size1, 8)
+            for count1 in range(1, max_count1 + 1):
+                remaining1 = length - (size1 * count1)
+                if remaining1 == 0:
+                    valid_panels.append([size1] * count1)
+                elif remaining1 >= MIN_PANEL_SIZE:
+                    for size2 in standard_sizes:
+                        if size2 <= remaining1:
+                            if remaining1 % size2 == 0:
+                                count2 = remaining1 // size2
+                                valid_panels.append([size1] * count1 + [size2] * count2)
+                            elif remaining1 > size2 and (remaining1 % size2) >= MIN_PANEL_SIZE:
+                                count2 = remaining1 // size2
+                                last_panel = remaining1 - (size2 * count2)
+                                if last_panel >= MIN_PANEL_SIZE:
+                                    valid_panels.append([size1] * count1 + [size2] * count2 + [last_panel])
     
-    panel_combinations_cache[target_length] = best_combination
-    return best_combination
+    if length <= MAX_PANEL_SIZE and length >= MIN_PANEL_SIZE:
+        if length in STANDARD_PANEL_SIZES:
+            valid_panels.append([length])
+        else:
+            valid_panels.append([length])
+    
+    valid_panels = [
+        combo for combo in valid_panels 
+        if all(MIN_PANEL_SIZE <= p <= MAX_PANEL_SIZE for p in combo) and sum(combo) == length
+    ]
+    
+    verified_panels = []
+    seen = set()
+    for combo in valid_panels:
+        combo_tuple = tuple(sorted(combo))
+        if combo_tuple not in seen:
+            verified_panels.append(combo)
+            seen.add(combo_tuple)
+    
+    sorted_panels = sorted(
+        verified_panels,
+        key=lambda x: (
+            sum(0 if p in STANDARD_PANEL_SIZES else 1 for p in x),
+            len(x),
+            -sum(p for p in x) / len(x) if x else 0,
+            -sum(1 for p in x if p == MAX_PANEL_SIZE)
+        )
+    )
+    
+    if not sorted_panels and length > 0:
+        if length < MIN_PANEL_SIZE:
+            sorted_panels = [[MIN_PANEL_SIZE]]
+        elif length <= MAX_PANEL_SIZE:
+            sorted_panels = [[length]]
+        else:
+            max_count = length // MAX_PANEL_SIZE
+            remaining = length % MAX_PANEL_SIZE
+            if remaining >= MIN_PANEL_SIZE:
+                sorted_panels = [[MAX_PANEL_SIZE] * max_count + [remaining]]
+            else:
+                adjusted = [MAX_PANEL_SIZE] * (max_count - 1)
+                remaining_length = MAX_PANEL_SIZE + remaining
+                for size in sorted(standard_sizes, reverse=True):
+                    if remaining_length >= size + MIN_PANEL_SIZE:
+                        final_remainder = remaining_length - size
+                        if final_remainder >= MIN_PANEL_SIZE:
+                            sorted_panels = [adjusted + [size, final_remainder]]
+                            break
+                if not sorted_panels:
+                    if (max_count-1) * MAX_PANEL_SIZE >= length - MIN_PANEL_SIZE:
+                        remaining = length - (max_count-1) * MAX_PANEL_SIZE
+                        sorted_panels = [[MAX_PANEL_SIZE] * (max_count-1) + [remaining]]
+                    else:
+                        min_count = (length + MIN_PANEL_SIZE - 1) // MIN_PANEL_SIZE
+                        sorted_panels = [[MIN_PANEL_SIZE] * min_count]
+    
+    panel_combinations_cache[length] = sorted_panels
+    return sorted_panels
 
 def optimize_panels_and_accessories(castings: List[Casting], primary_idx: int) -> Dict:
     """
-    Optimize panel layout and IC/EC accessories with cumulative reuse.
-    
-    CRITICAL: IC/EC are NOT subtracted from wall length!
-    They are mounted on panels and shown for display only.
-    
-    Panel joining: smaller panels can be joined to create larger ones.
+    Optimize panel layout and IC/EC accessories with cumulative reuse: 
+    panels and accessories from all previous castings are available for reuse in each subsequent casting.
     """
-    print("\nOptimizing panel layouts with cumulative reuse + joining...")
-    print("NOTE: IC/EC are displayed but NOT subtracted from wall lengths\n")
+    print("\nOptimizing panel layouts and accessories with cumulative reuse...")
     
     ordered_castings = castings
     panel_inventory = {}
@@ -479,55 +383,26 @@ def optimize_panels_and_accessories(castings: List[Casting], primary_idx: int) -
     panels_used_per_casting = []
     ic_used_per_casting = []
     ec_used_per_casting = []
-    
-    # Track joining statistics
-    total_joins = 0
-    joins_per_casting = []
 
     for cast_idx, casting in enumerate(ordered_castings):
         casting_panels_used = {}
         casting_ic_used = casting.get_total_ic_requirement()
         casting_ec_used = casting.get_total_ec_requirement()
-        casting_joins = 0
         
-        print(f"\n--- Processing {casting.name} ---")
-        print(f"  Available inventory: {panel_inventory}")
-        
-        # Handle panel requirements - IC/EC NOT SUBTRACTED
+        # Handle panel requirements
         for shape in casting.shapes:
             for side_idx, side_length in enumerate(shape.sides):
-                # Get EXACT panel combination for the FULL side length
-                # IC/EC are NOT subtracted - they mount on top
-                layout = get_panel_combination_exact(side_length)
-                
-                # Verify exact match
-                if sum(layout) != side_length:
-                    print(f"  WARNING: Panel sum {sum(layout)} != side length {side_length}")
-                    # Force correction
-                    layout = [side_length]
-                
+                layouts = get_possible_panels(side_length)
+                if not layouts:
+                    continue
+                layout = layouts[0]
                 shape.panel_layout[side_idx] = layout.copy()
-                
-                # Process each panel in the layout with joining logic
                 for panel in layout:
-                    # Try to reuse existing panel or join smaller ones
-                    success, consumed = try_reuse_or_join(panel, panel_inventory)
-                    
-                    if success:
-                        # Panel satisfied from inventory (either exact or joined)
-                        if len(consumed) > 1:
-                            # This was a join operation
-                            casting_joins += 1
-                            total_joins += 1
+                    if panel_inventory.get(panel, 0) > 0:
+                        panel_inventory[panel] -= 1
                     else:
-                        # Need to create new panel
                         new_panels_added[panel] = new_panels_added.get(panel, 0) + 1
-                    
-                    # Track usage in this casting
                     casting_panels_used[panel] = casting_panels_used.get(panel, 0) + 1
-        
-        print(f"  Joins performed: {casting_joins}")
-        joins_per_casting.append(casting_joins)
         
         # Handle IC requirements
         if ic_inventory >= casting_ic_used:
@@ -557,7 +432,6 @@ def optimize_panels_and_accessories(castings: List[Casting], primary_idx: int) -
         ec_used_per_casting.append(casting_ec_used)
 
     print(f"\nOptimization completed.")
-    print(f"Total panel joins performed: {total_joins}")
     
     return {
         "new_panels_added": new_panels_added,
@@ -568,13 +442,11 @@ def optimize_panels_and_accessories(castings: List[Casting], primary_idx: int) -
         "ec_used_per_casting": ec_used_per_casting,
         "panel_inventory": panel_inventory,
         "final_ic_inventory": ic_inventory,
-        "final_ec_inventory": ec_inventory,
-        "total_joins": total_joins,
-        "joins_per_casting": joins_per_casting
+        "final_ec_inventory": ec_inventory
     }
 
 def print_results_with_accessories(castings: List[Casting], primary_idx: int, optimization_results: Dict) -> None:
-    """Print the optimized panel layouts and IC/EC requirements with enhanced reuse efficiency calculations."""
+    """Print the optimized panel layouts and IC/EC requirements for all castings with detailed cumulative reuse analysis."""
     print(f"\nResults (Primary Casting: {castings[primary_idx].name})\n")
 
     panels_used_per_casting = optimization_results["panels_used_per_casting"]
@@ -583,86 +455,81 @@ def print_results_with_accessories(castings: List[Casting], primary_idx: int, op
     new_panels_added = optimization_results["new_panels_added"]
     new_ic_added = optimization_results["new_ic_added"]
     new_ec_added = optimization_results["new_ec_added"]
-    total_joins = optimization_results.get("total_joins", 0)
-    joins_per_casting = optimization_results.get("joins_per_casting", [])
 
     for i, casting in enumerate(castings):
         print(f"{'*' * 20} {casting.name} {'*' * 20}")
         print("PRIMARY" if i == primary_idx else f"SECONDARY #{i if i > primary_idx else i+1}")
         
         for shape in casting.shapes:
-            print(f"\n  Shape: {shape.name}")
+            print(f"\n  Shape: {shape.name} (Type: {shape.shape_type})")
             print(f"    IC Requirement: {shape.ic_requirement}, EC Requirement: {shape.ec_requirement}")
             for side_idx, side_length in enumerate(shape.sides):
                 panels = shape.panel_layout[side_idx]
-                panel_sum = sum(panels)
                 print(f"    Side {side_idx+1} (Length: {side_length}): {panels}")
-                if panel_sum != side_length:
-                    print(f"      ⚠️ WARNING: Sum mismatch! Expected {side_length}, got {panel_sum}")
         
         print(f"  Panels used in this casting: {panels_used_per_casting[i]}")
         print(f"  IC used in this casting: {ic_used_per_casting[i]}")
         print(f"  EC used in this casting: {ec_used_per_casting[i]}")
-        if i < len(joins_per_casting):
-            print(f"  Panel joins performed: {joins_per_casting[i]}")
 
+    print("\n" + "=" * 50)
+    print("PANEL & ACCESSORIES USAGE SUMMARY")
+    print("=" * 50)
+    print(f"Total unique panel types used: {len(optimization_results['panel_inventory'])}")
+    print(f"Panel inventory after all castings: {optimization_results['panel_inventory']}")
+    print(f"IC inventory after all castings: {optimization_results['final_ic_inventory']}")
+    print(f"EC inventory after all castings: {optimization_results['final_ec_inventory']}")
+    print(f"Total new panels needed: {sum(new_panels_added.values())}")
+    print(f"Total new IC needed: {new_ic_added}")
+    print(f"Total new EC needed: {new_ec_added}")
+    print(f"Breakdown of new panels needed: {new_panels_added}")
+    
     print("\n" + "=" * 50)
     print("REQUIREMENTS BY CASTING")
     print("=" * 50)
     
-    # Calculate requirements per casting
-    casting_requirements = []
-    cumulative_panels = {}
-    cumulative_ic = 0
-    cumulative_ec = 0
+    total_new_panels = 0
+    total_new_ic = 0
+    total_new_ec = 0
     
-    for i, casting in enumerate(castings):
+    # Primary casting
+    primary_panels = sum(panels_used_per_casting[primary_idx].values())
+    primary_ic = ic_used_per_casting[primary_idx]
+    primary_ec = ec_used_per_casting[primary_idx]
+    
+    print(f"{castings[primary_idx].name} (PRIMARY): {primary_panels} panels, {primary_ic} IC, {primary_ec} EC needed")
+    total_new_panels += primary_panels
+    total_new_ic += primary_ic
+    total_new_ec += primary_ec
+    
+    # Secondary castings
+    cumulative_panels = panels_used_per_casting[primary_idx].copy()
+    cumulative_ic = primary_ic
+    cumulative_ec = primary_ec
+    
+    for i in range(len(castings)):
+        if i == primary_idx:
+            continue
+            
         used_panels = panels_used_per_casting[i]
         used_ic = ic_used_per_casting[i]
         used_ec = ec_used_per_casting[i]
         
-        if i == primary_idx:
-            # Primary casting needs all its resources
-            new_panels = sum(used_panels.values())
-            new_ic = used_ic
-            new_ec = used_ec
-            reused_panels = 0
-            reused_ic = 0
-            reused_ec = 0
-        else:
-            # Secondary casting can reuse from cumulative inventory
-            new_panels = 0
-            reused_panels = 0
-            temp_inventory = cumulative_panels.copy()
-            
-            for panel, count in used_panels.items():
-                reused = min(temp_inventory.get(panel, 0), count)
-                reused_panels += reused
-                new_panels += count - reused
-                temp_inventory[panel] = temp_inventory.get(panel, 0) - reused
-            
-            reused_ic = min(cumulative_ic, used_ic)
-            new_ic = max(0, used_ic - cumulative_ic)
-            reused_ec = min(cumulative_ec, used_ec)
-            new_ec = max(0, used_ec - cumulative_ec)
+        # Calculate panel reuse
+        new_panels_needed = 0
+        temp_inventory = cumulative_panels.copy()
+        for panel, count in used_panels.items():
+            reused_count = min(temp_inventory.get(panel, 0), count)
+            new_panels_needed += count - reused_count
+            temp_inventory[panel] = temp_inventory.get(panel, 0) - reused_count
         
-        casting_requirements.append({
-            'name': casting.name,
-            'is_primary': i == primary_idx,
-            'total_panels': sum(used_panels.values()),
-            'total_ic': used_ic,
-            'total_ec': used_ec,
-            'new_panels': new_panels,
-            'new_ic': new_ic,
-            'new_ec': new_ec,
-            'reused_panels': reused_panels,
-            'reused_ic': reused_ic,
-            'reused_ec': reused_ec
-        })
+        # Calculate IC/EC reuse
+        new_ic_needed = max(0, used_ic - cumulative_ic)
+        new_ec_needed = max(0, used_ec - cumulative_ec)
         
-        # Print requirement
-        casting_type = "PRIMARY" if i == primary_idx else "SECONDARY"
-        print(f"{casting.name} ({casting_type}): {new_panels} panels, {new_ic} IC, {new_ec} EC needed")
+        print(f"{castings[i].name} (SECONDARY): {new_panels_needed} panels, {new_ic_needed} IC, {new_ec_needed} EC needed")
+        total_new_panels += new_panels_needed
+        total_new_ic += new_ic_needed
+        total_new_ec += new_ec_needed
         
         # Update cumulative inventory
         for panel, count in used_panels.items():
@@ -670,27 +537,19 @@ def print_results_with_accessories(castings: List[Casting], primary_idx: int, op
         cumulative_ic += used_ic
         cumulative_ec += used_ec
     
-    # Total new resources
-    total_new_panels = sum(req['new_panels'] for req in casting_requirements)
-    total_new_ic = sum(req['new_ic'] for req in casting_requirements)
-    total_new_ec = sum(req['new_ec'] for req in casting_requirements)
-    
     print(f"\nTotal new resources needed for entire project:")
     print(f"  Panels: {total_new_panels}")
     print(f"  IC: {total_new_ic}")
     print(f"  EC: {total_new_ec}")
-    print(f"\nPanel joining statistics:")
-    print(f"  Total joins performed: {total_joins}")
-    print(f"  Joins saved {total_joins} new panel(s) from being fabricated")
 
-    # Calculate overall reuse efficiency (all castings)
-    total_panels_used = sum(req['total_panels'] for req in casting_requirements)
-    total_ic_used = sum(req['total_ic'] for req in casting_requirements)
-    total_ec_used = sum(req['total_ec'] for req in casting_requirements)
+    # Calculate overall efficiency
+    total_panels_used = sum(sum(casting_panels.values()) for casting_panels in panels_used_per_casting)
+    total_ic_used = sum(ic_used_per_casting)
+    total_ec_used = sum(ec_used_per_casting)
     
-    total_panels_reused = sum(req['reused_panels'] for req in casting_requirements)
-    total_ic_reused = sum(req['reused_ic'] for req in casting_requirements)
-    total_ec_reused = sum(req['reused_ec'] for req in casting_requirements)
+    total_panels_reused = total_panels_used - total_new_panels
+    total_ic_reused = total_ic_used - total_new_ic
+    total_ec_reused = total_ec_used - total_new_ec
     
     total_resources_used = total_panels_used + total_ic_used + total_ec_used
     total_resources_reused = total_panels_reused + total_ic_reused + total_ec_reused
@@ -702,35 +561,11 @@ def print_results_with_accessories(castings: List[Casting], primary_idx: int, op
         ec_efficiency = (total_ec_reused / total_ec_used) * 100 if total_ec_used > 0 else 0
         
         print(f"\nOverall resource reuse efficiency: {overall_efficiency:.1f}%")
-        print(f"Panel reuse efficiency: {panel_efficiency:.1f}%")
-        print(f"IC reuse efficiency: {ic_efficiency:.1f}%")
-        print(f"EC reuse efficiency: {ec_efficiency:.1f}%")
-    
-    # Calculate secondary reuse efficiency (castings 2..N)
-    secondary_castings = [req for req in casting_requirements if not req['is_primary']]
-    
-    if len(secondary_castings) > 0:
-        secondary_panels_used = sum(req['total_panels'] for req in secondary_castings)
-        secondary_ic_used = sum(req['total_ic'] for req in secondary_castings)
-        secondary_ec_used = sum(req['total_ec'] for req in secondary_castings)
-        
-        secondary_panels_reused = sum(req['reused_panels'] for req in secondary_castings)
-        secondary_ic_reused = sum(req['reused_ic'] for req in secondary_castings)
-        secondary_ec_reused = sum(req['reused_ec'] for req in secondary_castings)
-        
-        secondary_resources_used = secondary_panels_used + secondary_ic_used + secondary_ec_used
-        secondary_resources_reused = secondary_panels_reused + secondary_ic_reused + secondary_ec_reused
-        
-        if secondary_resources_used > 0:
-            secondary_overall_efficiency = (secondary_resources_reused / secondary_resources_used) * 100
-            secondary_panel_efficiency = (secondary_panels_reused / secondary_panels_used) * 100 if secondary_panels_used > 0 else 0
-            secondary_ic_efficiency = (secondary_ic_reused / secondary_ic_used) * 100 if secondary_ic_used > 0 else 0
-            secondary_ec_efficiency = (secondary_ec_reused / secondary_ec_used) * 100 if secondary_ec_used > 0 else 0
-            
-            print(f"\nSecondary resource reuse efficiency: {secondary_overall_efficiency:.1f}%")
-            print(f"Secondary panel reuse efficiency: {secondary_panel_efficiency:.1f}%")
-            print(f"Secondary IC reuse efficiency: {secondary_ic_efficiency:.1f}%")
-            print(f"Secondary EC reuse efficiency: {secondary_ec_efficiency:.1f}%")
+        print(f"  Panel reuse efficiency: {panel_efficiency:.1f}% ({total_panels_reused} of {total_panels_used} panels reused)")
+        print(f"  IC reuse efficiency: {ic_efficiency:.1f}% ({total_ic_reused} of {total_ic_used} IC reused)")
+        print(f"  EC reuse efficiency: {ec_efficiency:.1f}% ({total_ec_reused} of {total_ec_used} EC reused)")
+    else:
+        print("\nResource reuse efficiency: N/A (no castings)")
 
 def convert_extracted_data_to_castings(castings_data: List[Dict]) -> List[Casting]:
     """Convert extracted casting data to Casting objects for optimization."""
@@ -738,19 +573,9 @@ def convert_extracted_data_to_castings(castings_data: List[Dict]) -> List[Castin
     
     for casting_data in castings_data:
         casting = Casting(casting_data["name"])
-        for shape_name, shape_info in casting_data["shapes"].items():
-            # Extract sides, IC, and EC from shape_info
-            if isinstance(shape_info, dict) and "sides" in shape_info:
-                sides = [length for _, length in shape_info["sides"].items()]
-                ic_count = shape_info.get("IC", 0)
-                ec_count = shape_info.get("EC", 0)
-            else:
-                # Fallback for old format
-                sides = [length for _, length in shape_info.items() if isinstance(length, (int, float))]
-                ic_count = 0
-                ec_count = 0
-            
-            shape = Shape(shape_name, sides, ic_count, ec_count)
+        for shape_name, sides_data in casting_data["shapes"].items():
+            sides = [length for _, length in sides_data.items()]
+            shape = Shape(shape_name, sides)
             casting.add_shape(shape)
         castings.append(casting)
     
@@ -892,12 +717,12 @@ def extract_castings_route():
         try:
             file.save(file_path)
             
-            # Extract castings using text-based extraction with IC/EC detection
+            # Extract castings using text-based extraction
             castings_data = extract_castings_from_pdf(file_path)
             
             # Display extracted data for verification
             print("\n" + "=" * 80)
-            print("EXTRACTED CASTING DATA (Text-Based Extraction with IC/EC)")
+            print("EXTRACTED CASTING DATA (Text-Based Extraction)")
             print("=" * 80)
             print(json.dumps(castings_data, indent=2))
             print("=" * 80 + "\n")
@@ -962,107 +787,22 @@ def optimize():
         # Export to Excel with accessories
         export_to_excel_with_accessories(panel_data, new_ic_added, new_ec_added)
 
-        # Calculate efficiency metrics
-        panels_used_per_casting = optimization_results["panels_used_per_casting"]
-        ic_used_per_casting = optimization_results["ic_used_per_casting"]
-        ec_used_per_casting = optimization_results["ec_used_per_casting"]
-        
-        # Calculate requirements per casting
-        casting_requirements = []
-        cumulative_panels = {}
-        cumulative_ic = 0
-        cumulative_ec = 0
-        
-        for i, casting in enumerate(castings):
-            used_panels = panels_used_per_casting[i]
-            used_ic = ic_used_per_casting[i]
-            used_ec = ec_used_per_casting[i]
-            
-            if i == primary_idx:
-                new_panels = sum(used_panels.values())
-                new_ic = used_ic
-                new_ec = used_ec
-                reused_panels = 0
-                reused_ic = 0
-                reused_ec = 0
-            else:
-                new_panels = 0
-                reused_panels = 0
-                temp_inventory = cumulative_panels.copy()
-                
-                for panel, count in used_panels.items():
-                    reused = min(temp_inventory.get(panel, 0), count)
-                    reused_panels += reused
-                    new_panels += count - reused
-                    temp_inventory[panel] = temp_inventory.get(panel, 0) - reused
-                
-                reused_ic = min(cumulative_ic, used_ic)
-                new_ic = max(0, used_ic - cumulative_ic)
-                reused_ec = min(cumulative_ec, used_ec)
-                new_ec = max(0, used_ec - cumulative_ec)
-            
-            casting_requirements.append({
-                'name': casting.name,
-                'is_primary': i == primary_idx,
-                'total_panels': sum(used_panels.values()),
-                'total_ic': used_ic,
-                'total_ec': used_ec,
-                'new_panels': new_panels,
-                'new_ic': new_ic,
-                'new_ec': new_ec,
-                'reused_panels': reused_panels,
-                'reused_ic': reused_ic,
-                'reused_ec': reused_ec
-            })
-            
-            # Update cumulative inventory
-            for panel, count in used_panels.items():
-                cumulative_panels[panel] = cumulative_panels.get(panel, 0) + count
-            cumulative_ic += used_ic
-            cumulative_ec += used_ec
-        
-        # Calculate overall efficiency (all castings)
-        total_panels_used = sum(req['total_panels'] for req in casting_requirements)
-        total_ic_used = sum(req['total_ic'] for req in casting_requirements)
-        total_ec_used = sum(req['total_ec'] for req in casting_requirements)
-        
-        total_panels_reused = sum(req['reused_panels'] for req in casting_requirements)
-        total_ic_reused = sum(req['reused_ic'] for req in casting_requirements)
-        total_ec_reused = sum(req['reused_ec'] for req in casting_requirements)
-        
+        # Calculate overall efficiency including accessories
+        total_panels_used = sum(sum(casting_panels.values()) for casting_panels in optimization_results["panels_used_per_casting"])
+        total_ic_used = sum(optimization_results["ic_used_per_casting"])
+        total_ec_used = sum(optimization_results["ec_used_per_casting"])
         total_resources_used = total_panels_used + total_ic_used + total_ec_used
+        
+        total_new_panels = sum(new_panels_added.values())
+        total_panels_reused = total_panels_used - total_new_panels
+        total_ic_reused = total_ic_used - new_ic_added
+        total_ec_reused = total_ec_used - new_ec_added
         total_resources_reused = total_panels_reused + total_ic_reused + total_ec_reused
         
         overall_efficiency = (total_resources_reused / total_resources_used * 100) if total_resources_used > 0 else 0
         panel_efficiency = (total_panels_reused / total_panels_used * 100) if total_panels_used > 0 else 0
         ic_efficiency = (total_ic_reused / total_ic_used * 100) if total_ic_used > 0 else 0
         ec_efficiency = (total_ec_reused / total_ec_used * 100) if total_ec_used > 0 else 0
-        
-        # Calculate secondary efficiency (castings 2..N)
-        secondary_castings = [req for req in casting_requirements if not req['is_primary']]
-        
-        secondary_overall_efficiency = 0
-        secondary_panel_efficiency = 0
-        secondary_ic_efficiency = 0
-        secondary_ec_efficiency = 0
-        
-        if len(secondary_castings) > 0:
-            secondary_panels_used = sum(req['total_panels'] for req in secondary_castings)
-            secondary_ic_used = sum(req['total_ic'] for req in secondary_castings)
-            secondary_ec_used = sum(req['total_ec'] for req in secondary_castings)
-            
-            secondary_panels_reused = sum(req['reused_panels'] for req in secondary_castings)
-            secondary_ic_reused = sum(req['reused_ic'] for req in secondary_castings)
-            secondary_ec_reused = sum(req['reused_ec'] for req in secondary_castings)
-            
-            secondary_resources_used = secondary_panels_used + secondary_ic_used + secondary_ec_used
-            secondary_resources_reused = secondary_panels_reused + secondary_ic_reused + secondary_ec_reused
-            
-            if secondary_resources_used > 0:
-                secondary_overall_efficiency = (secondary_resources_reused / secondary_resources_used) * 100
-                secondary_panel_efficiency = (secondary_panels_reused / secondary_panels_used) * 100 if secondary_panels_used > 0 else 0
-                secondary_ic_efficiency = (secondary_ic_reused / secondary_ic_used) * 100 if secondary_ic_used > 0 else 0
-                secondary_ec_efficiency = (secondary_ec_reused / secondary_ec_used) * 100 if secondary_ec_used > 0 else 0
 
         # Prepare results for JSON
         results = {
@@ -1076,11 +816,9 @@ def optimize():
                     for panels in shape.panel_layout
                     for panel in panels
                 )),
-                'total_new_panels_needed': sum(new_panels_added.values()),
+                'total_new_panels_needed': total_new_panels,
                 'total_new_ic_needed': new_ic_added,
                 'total_new_ec_needed': new_ec_added,
-                'total_joins_performed': optimization_results.get('total_joins', 0),
-                'joins_per_casting': optimization_results.get('joins_per_casting', []),
                 'overall_efficiency': {
                     'total_efficiency': round(overall_efficiency, 1),
                     'panel_efficiency': round(panel_efficiency, 1),
@@ -1089,21 +827,15 @@ def optimize():
                     'total_resources_used': total_resources_used,
                     'total_resources_reused': total_resources_reused
                 },
-                'secondary_efficiency': {
-                    'total_efficiency': round(secondary_overall_efficiency, 1),
-                    'panel_efficiency': round(secondary_panel_efficiency, 1),
-                    'ic_efficiency': round(secondary_ic_efficiency, 1),
-                    'ec_efficiency': round(secondary_ec_efficiency, 1)
-                },
                 'panel_reuse_analysis': {
                     'primary_casting': {
                         'name': castings[primary_idx].name,
-                        'panels_used': panels_used_per_casting[primary_idx],
-                        'ic_used': ic_used_per_casting[primary_idx],
-                        'ec_used': ec_used_per_casting[primary_idx],
-                        'new_panels_needed': panels_used_per_casting[primary_idx],
-                        'new_ic_needed': ic_used_per_casting[primary_idx],
-                        'new_ec_needed': ec_used_per_casting[primary_idx]
+                        'panels_used': optimization_results["panels_used_per_casting"][primary_idx],
+                        'ic_used': optimization_results["ic_used_per_casting"][primary_idx],
+                        'ec_used': optimization_results["ec_used_per_casting"][primary_idx],
+                        'new_panels_needed': optimization_results["panels_used_per_casting"][primary_idx],
+                        'new_ic_needed': optimization_results["ic_used_per_casting"][primary_idx],
+                        'new_ec_needed': optimization_results["ec_used_per_casting"][primary_idx]
                     },
                     'secondary_castings': []
                 },
@@ -1116,7 +848,11 @@ def optimize():
             }
         }
 
-        # Add secondary casting analysis
+        # Add secondary casting analysis with IC/EC
+        panels_used_per_casting = optimization_results["panels_used_per_casting"]
+        ic_used_per_casting = optimization_results["ic_used_per_casting"]
+        ec_used_per_casting = optimization_results["ec_used_per_casting"]
+        
         cumulative_panels = panels_used_per_casting[primary_idx].copy()
         cumulative_ic = ic_used_per_casting[primary_idx]
         cumulative_ec = ec_used_per_casting[primary_idx]
@@ -1176,6 +912,7 @@ def optimize():
             for shape in casting.shapes:
                 shape_data = {
                     'name': shape.name,
+                    'shape_type': shape.shape_type,
                     'sides': shape.sides,
                     'panel_layouts': shape.panel_layout,
                     'ic_requirement': shape.ic_requirement,
