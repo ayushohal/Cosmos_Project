@@ -10,7 +10,10 @@ This tool extracts wall dimensions and casting data from PDF plans to calculate 
 
 1.  **Clone the GitHub repository:**
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/ayushohal/Cosmos_Project.git
+    ```
+    ```bash
+    cd Cosmos_Project
     ```
 
 2.  **Install the required dependencies from the `requirements.txt` file:**
